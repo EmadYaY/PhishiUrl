@@ -26,7 +26,7 @@ PhishiUrl is designed to help identify and mitigate potential phishing attacks t
 1. Clone the repository:
 
     ```bash
-    git clone https://github.com/yourusername/phishiurl.git
+    git clone https://github.com/EmadYaY/PhishiUrl.git
     cd phishiurl
     ```
 
