@@ -133,12 +133,12 @@ Clone a website, use local files, or display in an iframe, capture user data, an
 
 Clone with all assets:
 ```bash
-phishiurl clone --url https://voorivex.academy/login --port 8080 --use-ngrok --download-js --download-all
+phishiurl clone --url https://domain.tld/login --port 8080 --use-ngrok --download-js --download-all
 ```
 
 Use iframe mode:
 ```bash
-phishiurl clone --url https://voorivex.academy/login --port 8080 --use-ngrok --use-iframe
+phishiurl clone --url https://domain.tld/login --port 8080 --use-ngrok --use-iframe
 ```
 
 Clone from local files:
@@ -171,7 +171,7 @@ To test the features of version 1.2.8, follow these steps:
 
 3. Run the clone command:
    ```bash
-   phishiurl clone --url https://voorivex.academy/login/ --port 8080 --use-ngrok --download-js --download-all
+   phishiurl clone --url https://domain.tld/login/ --port 8080 --use-ngrok --download-js --download-all
    ```
 
 4. When prompted, select url:
@@ -182,13 +182,13 @@ To test the features of version 1.2.8, follow these steps:
 5. Check the output:
    - The page should open in the browser (e.g., http://domain.tld:8080)
    - The page should look similar to the original site (CSS, JS, images, and fonts loaded)
-   - Entered data (e.g., username, password) should be saved in templates/cloned/voorivex_аcаdemy/credentials.txt
+   - Entered data (e.g., username, password) should be saved in templates/cloned/domain_tld/credentials.txt
 
 ### Test Iframe Mode
 
 1. Run the clone command with iframe:
    ```bash
-   phishiurl clone --url https://voorivex.academy/login/ --port 8080 --use-ngrok --use-iframe
+   phishiurl clone --url https://domain.tld/login/ --port 8080 --use-ngrok --use-iframe
    ```
 
 2. When prompted, select iframe:
