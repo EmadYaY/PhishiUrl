@@ -73,6 +73,11 @@ To use PhishiUrl, you need to install the following:
    python -m venv venv
    source venv/bin/activate  # Linux/Mac
    venv\Scripts\activate     # Windows
+   in case of PowerShell error: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+   ```
+
+   ```txt
+   For now, this version works only in Windows
    ```
 
 3. Install the dependencies:
