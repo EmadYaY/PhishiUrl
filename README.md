@@ -180,7 +180,7 @@ To test the features of version 1.2.8, follow these steps:
    ```
 
 5. Check the output:
-   - The page should open in the browser (e.g., http://voorivex.аcаdemy:8080)
+   - The page should open in the browser (e.g., http://domain.tld:8080)
    - The page should look similar to the original site (CSS, JS, images, and fonts loaded)
    - Entered data (e.g., username, password) should be saved in templates/cloned/voorivex_аcаdemy/credentials.txt
 
