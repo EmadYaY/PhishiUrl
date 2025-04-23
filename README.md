@@ -1,6 +1,9 @@
+![image-1](1.jpg "PhishiUrl")
+
 # PhishiUrl - Phishing Detection and Simulation Tool
 
 PhishiUrl is a powerful tool for detecting and simulating phishing attacks, designed to assist cybersecurity professionals and penetration testers in identifying and mitigating vulnerabilities. With a variety of features, including homoglyph URL generation, website cloning, and URL security analysis, this tool is built for ethical security testing.
+a related article: [PDF](homograph_full.pdf "PhishiUrl")
 
 **Current Version**: 1.2.8  
 **Author**: Emad  
@@ -212,6 +215,8 @@ To test the features of version 1.2.8, follow these steps:
    ```
 
 ## 🎯 Future Goals and Improvements
+
+![image-1](2.jpg "PhishiUrl")
 
 Future versions of PhishiUrl aim to enhance functionality and introduce new features. Planned updates include:
 
