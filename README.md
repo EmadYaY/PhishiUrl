@@ -258,13 +258,8 @@ We welcome contributions! To report bugs, suggest new features, or submit a pull
 ## 📜 Version History
 
 ### Version 1.2.8 (April 2025)
-- Added `--download-all` option to download all assets
-- Added iframe mode with `--use-iframe` option
-- Data capture only on form submission (reduced log size)
-- Improved handling of downloaded resource paths
 
 ### Previous Versions
-- Version 1.2.7: Added initial cloning functionality and Ngrok integration
 
 ## 📄 License
 
