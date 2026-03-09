@@ -1,15 +1,16 @@
-# Core Dependencies
-python-nmap==0.7.1         # Python wrapper for Nmap
-python-whois==0.8.0        # WHOIS domain availability checks
+# PhishiUrl v1.3.0 – requirements
+# Install: pip install -r requirements.txt
 
-# CLI and System Utilities
-argparse==1.4.0            # Command-line argument parsing (default in Python >=3.2)
-colorama==0.4.6            # Cross-platform colored terminal text
+click>=8.0
+rich>=13.0
+requests>=2.28
+pyngrok>=6.0
+python-whois>=0.8
+qrcode>=7.0
+beautifulsoup4>=4.11
+lxml>=4.9
+selenium>=4.0
+webdriver-manager>=3.8
 
-# Python Version Compatibility
-platform==1.0.8            # System version and platform detection
-
-# Optional Additions
-itertools==8.4.0           # Combinatorial iterator tools (builtin in Python >=3.0)
-
-#itertools, platform, sys, argparse, and os are part of Python's standard library. They do not need to be installed via pip, as they come built-in with Python.
+# Windows only (install manually on Windows):
+# pywin32
