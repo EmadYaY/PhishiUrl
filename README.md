@@ -87,6 +87,10 @@ Using this tool for illegal purposes, such as stealing data or conducting real p
    pip install .
    ```
 
+   > **Bash/Zsh error?** Run: `ip install . --break-system-packages --force-reinstall --no-cache-dir --ignore-installed PyYAML`
+      If you dont wana use venv: --break-system-packages
+
+
 4. Configure `config.json`:
    ```json
    {
